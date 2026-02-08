@@ -32,7 +32,7 @@
             transform: translate(-50%, -50%);
             width: var(--move-dot-size);
             height: var(--move-dot-size);
-            background: rgba(46, 204, 113, 0.4);
+            background: rgba(128,128,128,0.4); /* رصاصي شفاف بدلاً من الأخضر */
             border-radius: 50%;
             pointer-events: none;
         }
@@ -61,7 +61,7 @@
         .menu-btn.online{background:linear-gradient(135deg,#3498db,#2980b9)}
         #scoreboard{position:absolute;left:0;top:-58px;width:100%;display:flex;justify-content:space-between;align-items:center}
         .points-badge{background:#f1c40f;color:#000;padding:6px 14px;border-radius:20px;font-weight:700}
-        #exit-btn{position:absolute;right:0;top:-58px;background:rgba(231,76,60,0.14);color:#ffb3b0;border:1px solid #e74c3c;padding:6px 12px;border-radius:6px;display:none;cursor:pointer}
+        #exit-btn{position:absolute;right:0;top:-58px;background:rgba(231,76,60,0.14);Color:#ffb3b0;border:1px solid #e74c3c;padding:6px 12px;border-radius:6px;display:none;cursor:pointer}
 
         /* شاشة النتيجة */
         #result-screen{display:none;position:absolute;inset:0;background:rgba(0,0,0,0.92);z-index:100;border-radius:10px;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:24px}
@@ -131,6 +131,10 @@
 
     var gameOver = false; // علامة انتهاء المباراة
 
+    // قائمة للحفاظ على آخر حركات القلاع لمنع التكرار
+    var recentRookMoves = []; // كل عنصر: { color:'w'|'b', from:'a1', to:'a3' }
+    const RECENT_ROOK_STORE = 6; // حجم الذاكرة
+
     const weights = { p:100, n:320, b:330, r:500, q:900, k:20000 };
 
     function evaluateBoard(g) {
@@ -146,6 +150,18 @@
             }
         }
         return totalEval;
+    }
+
+    // دالة مساعدة لاكتشاف إذا كانت حركة القلعة ترد على حركة سابقة (back-and-forth)
+    function isRookBackAndForth(mvObj) {
+        if (mvObj.piece !== 'r') return false;
+        let last = recentRookMoves.length ? recentRookMoves[recentRookMoves.length - 1] : null;
+        if (!last) return false;
+        // لو آخر حركة قلعة لنفس اللون هي عكس الحركة الحالية => تعتبر تكرار
+        if (last.color === mvObj.color && last.from === mvObj.to && last.to === mvObj.from) {
+            return true;
+        }
+        return false;
     }
 
     function minimax(g, depth, alpha, beta, isMax) {
@@ -174,24 +190,90 @@
         }
     }
 
+    // ================= تعديلات كبيرة هنا لمنع تحريك القلعة بلا هدف =================
     function makeBestMove() {
         if (gameOver) return;
-        let moves = game.moves();
+        // نأخذ الحركات بتفصيل verbose حتى نعرف القطعة من أين وإلى أين
+        let moves = game.moves({ verbose: true });
         if (moves.length === 0) return;
-        let bestMove = null;
+
+        let bestMoveObj = null;
         let bestValue = -99999;
-        for (let mv of moves) {
-            game.move(mv);
+
+        for (let mvObj of moves) {
+            // منع حركات القلعة التي تكرر نفس التحرك (back-and-forth)
+            if (mvObj.piece === 'r' && !mvObj.captured) {
+                if (isRookBackAndForth(mvObj)) {
+                    // نتخطى هذه الحركة نهائياً لأنها ترد على نفسها
+                    continue;
+                }
+            }
+
+            // محاكاة الحركة
+            game.move({ from: mvObj.from, to: mvObj.to, promotion: 'q' });
+
+            // بعد الحركة نتحقق إن كانت القلعة التي تحركت (إن كانت قلعة) قابلة للأسر مباشرة من الخصم
+            let immediateDanger = false;
+            if (mvObj.piece === 'r') {
+                let opponentMoves = game.moves({ verbose: true });
+                for (let op of opponentMoves) {
+                    if (op.captured && op.to === mvObj.to) {
+                        immediateDanger = true;
+                        break;
+                    }
+                }
+            }
+
+            // إذا كانت الحركة تسبب تعريض القلعة للأسر فنتجنبها (تخطي)
+            if (immediateDanger) {
+                game.undo();
+                continue;
+            }
+
+            // نقيّم الحالة بعد الحركة عبر minimax
             let val = minimax(game, difficultyDepth - 1, -100000, 100000, false);
+
             game.undo();
-            if (val > bestValue) { bestValue = val; bestMove = mv; }
+
+            // خفّض قيمة الحركات التي هي حركات قلعة بلا احتلال أو تأثير (كعقاب بسيط) حتى لا يفضلها المحرك
+            if (mvObj.piece === 'r' && !mvObj.captured) {
+                // نعطي خصم بسيط للقيمة لمنع القلاع من التجوال بدون هدف
+                val -= 40;
+            }
+
+            // اختر أفضل حركة
+            if (val > bestValue) {
+                bestValue = val;
+                bestMoveObj = mvObj;
+            }
         }
-        if (bestMove) {
-            game.move(bestMove);
+
+        // لو ما وجدنا حركة أفضل بسبب كل التصفية، نعيد محاولة بدون التصفية كحل احتياطي
+        if (!bestMoveObj) {
+            // نسخة احتياطية: اختر أي أفضل حركة عادية (بدون تجاهل back-and-forth)
+            let fallbackMoves = game.moves({ verbose: true });
+            let fv = -99999;
+            for (let mvObj of fallbackMoves) {
+                game.move({ from: mvObj.from, to: mvObj.to, promotion: 'q' });
+                let val = minimax(game, Math.max(1, difficultyDepth - 1), -100000, 100000, false);
+                game.undo();
+                if (val > fv) { fv = val; bestMoveObj = mvObj; }
+            }
+        }
+
+        // إذا وجدنا حركة نهائية ننفذها ونحدث recentRookMoves
+        if (bestMoveObj) {
+            game.move({ from: bestMoveObj.from, to: bestMoveObj.to, promotion: 'q' });
             board.position(game.fen());
+            // تحديث سجل حركات القلاع
+            if (bestMoveObj.piece === 'r') {
+                recentRookMoves.push({ color: bestMoveObj.color, from: bestMoveObj.from, to: bestMoveObj.to });
+                if (recentRookMoves.length > RECENT_ROOK_STORE) recentRookMoves.shift();
+            }
             updateStatus();
         }
     }
+    // =============================================================================
 
     // --- نظام النقر والدوائر ---
     var selectedSquare = null;
@@ -269,7 +351,7 @@
         }
 
         if (game.in_checkmate()) {
-            // ملاحظة: عند الكش مات اللاعب الذي دوره الآن هو الخاسر، ونبقي نفس سلوكك الحالي:
+            // عند الكش مات اللاعب الذي دوره الآن هو الخاسر
             showResult(game.turn() === 'b' ? "أنت فائز" : "أنت خاسر", gameMode === 'ai' ? difficultyDepth*15 : 10);
         } else if (game.in_draw()) {
             showResult("تعادل!", 0);
@@ -299,23 +381,18 @@
     function resetMenu() { $('#difficulty-menu').hide(); $('#main-menu').show(); }
 
     function startOnlineSearch() {
-        // واجهة مؤقتة للبحث (كما في كودك الأصلي)
         $('#main-menu').hide();
-        // يمكنك تعديلها لاحقاً لربط سيرفر أونلاين حقيقي
         setTimeout(() => { alert("لا يوجد لاعبون حالياً."); location.reload(); }, 2000);
     }
 
     function startOnlineFromResult() {
-        // عند الضغط من شاشة النتيجة نغلق النافذة ثم نبدأ البحث
         document.getElementById('result-screen').style.display = 'none';
-        gameOver = true; // نمنع تكرار التفاعل أثناء الانتقال
+        gameOver = true;
         startOnlineSearch();
     }
 
     function showResult(resultText, pointsToAdd) {
-        // منع المزيد من التفاعل
         gameOver = true;
-        // فك تمييزات وحركة
         removeHighlights();
         selectedSquare = null;
 
@@ -323,7 +400,6 @@
         const resPoints = document.getElementById('res-points');
 
         resTitle.innerText = resultText;
-        // ضبط اللون اعتماداً على النص (فائز أم خاسر)
         if (resultText.indexOf("فائز") !== -1) {
             resTitle.className = "result-text win-color";
         } else if (resultText.indexOf("خاسر") !== -1) {
@@ -339,41 +415,27 @@
             resPoints.innerText = "";
         }
 
-        // إظهار شاشة النتيجة
         document.getElementById('result-screen').style.display = "flex";
         document.getElementById('result-screen').setAttribute('aria-hidden', 'false');
-        // إخفاء زر الخروج حتى تختار خيار
         document.getElementById('exit-btn').style.display = 'none';
-
-        // فصل حدث النقر لمنع تحريك القطع (حماية إضافية)
         $(document).off('click', '.square-55d63', onSquareClick);
     }
 
     function goToMainMenu() {
-        // ببساطة نعيد تحميل الصفحة للعودة للقائمة الرئيسية (كما طلبت عدم تغيير الشيء الآخر)
         location.reload();
     }
 
     function restartGame() {
-        // إخفاء شاشة النتيجة وإعادة تهيئة اللعبة بنفس الإعدادات (gameMode, difficultyDepth)
         document.getElementById('result-screen').style.display = "none";
         document.getElementById('result-screen').setAttribute('aria-hidden', 'true');
         gameOver = false;
-        // إعادة تهيئة الحالة
         game = new Chess();
         if (board) {
             board.position('start');
-        } else {
-            // لو لم يتم إنشاء اللوح بعد، اترك startGame ينشئه
         }
-        // إعادة ربط حدث النقر
         $(document).off('click', '.square-55d63', onSquareClick);
         $(document).on('click', '.square-55d63', onSquareClick);
-
-        // إظهار زر الخروج إن كان في مباراة
         document.getElementById('exit-btn').style.display = (document.getElementById('overlay').style.display === 'none') ? 'block' : 'none';
-
-        // تحديث العرض والحالة
         updateStatus();
     }
 
@@ -383,7 +445,6 @@
         $('#overlay').fadeOut();
         $('#exit-btn').show();
 
-        // إنشاء اللوح أو إعادة استخدام الموجود
         if (!board) {
             board = Chessboard('board', {
                 position: 'start',
@@ -393,21 +454,17 @@
             board.position('start');
         }
 
-        // تهيئة اللعبة الجديدة
         game = new Chess();
         gameOver = false;
         selectedSquare = null;
         removeHighlights();
 
-        // ربط أحداث النقر بالمربعات
         $(document).off('click', '.square-55d63', onSquareClick);
         $(document).on('click', '.square-55d63', onSquareClick);
         updateStatus();
     }
 
-    // بدء افتراضي عند تحميل الصفحة: لا شيء، ينتظر اختيار المستخدم
     $(document).ready(function() {
-        // إظهار نقاط محفوظة
         document.getElementById('points-val').innerText = points;
     });
 </script>
